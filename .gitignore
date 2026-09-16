@@ -1,0 +1,10 @@
+wheels/
+.venv/
+*.jsonl
+corpus/
+*.index
+checkpoints/
+__pycache__/
+.pytest_cache/
+
+./to-review.md

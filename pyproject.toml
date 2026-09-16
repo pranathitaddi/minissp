@@ -1,0 +1,12 @@
+[project]
+name = "minissp"
+version = "0.0.1"
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["minissp*"]
