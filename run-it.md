@@ -17,3 +17,9 @@ pytest -q
 ```
 
 You should see all tests pass.
+
+## Fetch data
+
+```bash
+python scripts/get_data.py
+```
