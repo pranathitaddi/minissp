@@ -423,7 +423,8 @@ def _smoke(args: argparse.Namespace) -> None:
     model.eval()
     _print_vram("policy")
 
-    judge = Judge(cfg.judge_name, device="cuda" if torch.cuda.is_available() else "cpu").load()
+    judge_device = args.judge_device or ("cuda" if torch.cuda.is_available() else "cpu")
+    judge = Judge(cfg.judge_name, device=judge_device).load()
     _print_vram("judge")
 
     retriever = Retriever(index_dir, cfg.embed_name).load()
@@ -495,6 +496,8 @@ def main() -> None:
     parser.add_argument("--data-dir", dest="data_dir",
                         default=str(Path(__file__).resolve().parent.parent / "data"))
     parser.add_argument("--out", default="runs/smoke")
+    parser.add_argument("--judge-device", dest="judge_device", default="",
+                        help="device for the judge, e.g. cuda:1 (default: same as policy)")
     args = parser.parse_args()
 
     if not args.smoke:

@@ -96,7 +96,7 @@ def test_config_field_names_match_plan():
     # rather than surfacing later as a confusing CLI or training bug.
     expected = {
         "run_id", "seed", "policy_name", "judge_name", "embed_name",
-        "rag_solver", "proposer_reward", "batch_answers", "n_solver",
+        "judge_device", "rag_solver", "proposer_reward", "batch_answers", "n_solver",
         "max_turns_proposer", "max_turns_solver", "topk", "noise_docs",
         "max_prompt_tokens", "max_new_tokens_per_turn", "max_total_tokens",
         "lora_r", "lora_alpha", "lr", "kl_beta", "replay_reset_every",

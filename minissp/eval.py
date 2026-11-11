@@ -202,7 +202,7 @@ def main(argv: list[str] | None = None) -> None:
         model.load_adapter(str(ckpt / "adapter"), adapter_name="default")
 
     retriever = Retriever(index_dir, cfg.embed_name).load()
-    judge = Judge(cfg.judge_name, device=device).load()
+    judge = Judge(cfg.judge_name, device=cfg.judge_device or device).load()
 
     result = run(model, tok, retriever, judge, cfg, _read_jsonl(args.eval_file),
                  step=args.step, run_dir=run_dir)

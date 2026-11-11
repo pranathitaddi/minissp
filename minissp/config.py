@@ -23,6 +23,7 @@ class Config:
     policy_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
     judge_name: str = "Qwen/Qwen2.5-3B-Instruct"
     embed_name: str = "intfloat/e5-base-v2"
+    judge_device: str = ""               # "" = same device as the policy; e.g. "cuda:1" on 2-GPU hosts
     rag_solver: str = "judge"            # or "policy"
     proposer_reward: str = "1-acc"       # or "intermediate_difficulty"
     batch_answers: int = 8               # B

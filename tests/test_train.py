@@ -363,6 +363,19 @@ def test_fill_batch_is_all_dummy_when_nothing_is_available():
     assert all(r.is_dummy for r in rows)
 
 
+def test_replayed_items_are_never_credited_to_a_current_proposer():
+    # A fresh item carries the index of the proposer trajectory that made it
+    # in *its* step. Once buffered and replayed in a later step, that index
+    # would point at an unrelated trajectory, so the buffer must drop it.
+    buf = ReplayBuffer()
+    fresh = ReplayItem(question="q", answer="a", proposer_idx=3)
+    buf.push(fresh)
+    assert fresh.proposer_idx == 3  # the caller's object is untouched
+    rows, fill = buf.fill_batch([], 1)
+    assert fill["replay"] == 1
+    assert rows[0].proposer_idx is None
+
+
 def test_replay_buffer_serialises_round_trip(tmp_path):
     buf = ReplayBuffer()
     buf.extend(_item(i) for i in range(4))
@@ -396,6 +409,23 @@ def _peft_toy():
     torch.manual_seed(0)
     return get_peft_model(ToyLM(vocab=16, hidden=8),
                           LoraConfig(r=4, lora_alpha=8, target_modules=["proj"]))
+
+
+def test_compute_update_trains_in_train_mode_and_restores_eval_mode():
+    # Gradient checkpointing only engages in train mode, so the update must
+    # switch modes; rollouts must get the eval-mode model back afterwards.
+    from minissp.config import Config
+
+    model = _peft_toy()
+    model.eval()
+    seen = []
+    model.register_forward_pre_hook(lambda mod, args: seen.append(mod.training))
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-2)
+    tok = SimpleNamespace(pad_token_id=0)
+    compute_update(model, tok, opt, None, [([1, 2, 3, 4], [0, 1, 1, 1], 1.0)],
+                   Config(run_id="t"))
+    assert seen and all(seen)
+    assert model.training is False
 
 
 def test_compute_update_runs_end_to_end_and_moves_the_adapter():

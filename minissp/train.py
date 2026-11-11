@@ -25,7 +25,7 @@ import random
 import time
 import uuid
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import torch
@@ -260,7 +260,11 @@ class ReplayBuffer:
         return len(self.items)
 
     def push(self, item: ReplayItem) -> None:
-        self.items.append(item)
+        # A buffered question belongs to the step that proposed it. Its
+        # proposer_idx indexes *that* step's proposer trajectories, so keeping
+        # it would make a later step credit an unrelated fresh trajectory with
+        # this question's solver accuracy. Store a copy with the link cut.
+        self.items.append(replace(item, proposer_idx=None))
 
     def extend(self, items) -> None:
         for item in items:
@@ -412,6 +416,23 @@ def compute_update(model, tok, optimizer, scaler, samples, cfg,
     if total_mask <= 0:
         return {"loss": 0.0, "kl": 0.0, "grad_norm": 0.0, "skipped": True}
 
+    # Gradient checkpointing only engages in train mode (transformers checks
+    # `self.gradient_checkpointing and self.training`), and from_pretrained
+    # returns an eval-mode model. Without this, a T4 holds every layer's
+    # activations for 2k-token sequences and can OOM. Rollouts stay in eval
+    # mode (no LoRA dropout while sampling), so restore it afterwards.
+    was_training = model.training
+    model.train()
+    try:
+        return _compute_update(model, tok, optimizer, scaler, samples, cfg,
+                               micro_batch, device, pad_id, total_mask)
+    finally:
+        if not was_training:
+            model.eval()
+
+
+def _compute_update(model, tok, optimizer, scaler, samples, cfg, micro_batch,
+                    device, pad_id, total_mask) -> dict:
     optimizer.zero_grad(set_to_none=True)
     loss_sum = 0.0
     kl_sum = 0.0
@@ -726,7 +747,7 @@ def main(argv: list[str] | None = None) -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=(device == "cuda"))
 
     retriever = Retriever(index_dir, cfg.embed_name).load()
-    judge = Judge(cfg.judge_name, device=device).load()
+    judge = Judge(cfg.judge_name, device=cfg.judge_device or device).load()
 
     answers = _read_jsonl(args.answers)
     eval_rows = _read_jsonl(args.eval_file)

@@ -85,6 +85,15 @@ python -m minissp.data build-index --out ~/minissp_index/ # -> corpus.faiss, doc
 Upload the resulting `corpus.faiss` and `docs.jsonl` to `MyDrive/minissp/index/` by
 hand before the first Colab session — see `colab/run.ipynb`.
 
+## Running on Kaggle (end to end, including data prep)
+
+Import `kaggle/minissp_kaggle.ipynb` into Kaggle, set **Accelerator: GPU T4 x2** and
+**Internet: On**, then **Save Version → Save & Run All (Commit)**. The notebook clones
+this repo, builds the scoped corpus and index from wiki-18, runs the smoke test and a
+step-0 eval, trains in 10-step chunks within a time budget, and writes plots plus
+`results/summary.json` to the version's output. If one 12-hour session isn't enough,
+attach that output as an input and commit again; it resumes from the last checkpoint.
+
 ## Training on Colab
 
 1. Push your branch — Colab pulls the repo via git.

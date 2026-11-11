@@ -165,6 +165,10 @@ def read_test(path: str | Path) -> list[dict]:
             if not question or not targets:
                 skipped += 1
                 continue
+            # The released file names sources "searchR1_nq", "searchR1_hotpotqa",
+            # ...; downstream code (freeze, eval by_source) uses the bare name.
+            if source.startswith("searchR1_"):
+                source = source[len("searchR1_"):]
             out.append({"question": question, "targets": list(targets), "source": source})
 
     if skipped:
@@ -212,6 +216,12 @@ def iter_wiki(path: str | Path) -> Iterator[dict]:
             elif "contents" in row:
                 contents = row["contents"]
                 title, _, text = contents.partition("\n")
+                # Search-R1's wiki-18 stores the title line quoted ('"Aaron"');
+                # unquoted, it can title-match entities and renders cleanly in
+                # format_information's (Title: "...") wrapper.
+                title = title.strip()
+                if len(title) >= 2 and title[0] == '"' and title[-1] == '"':
+                    title = title[1:-1]
                 yield {"id": row.get("id"), "title": title, "text": text}
             else:
                 # Unrecognized shape — skip rather than guess wrong.
@@ -226,6 +236,56 @@ def _whole_word_match(entity_lower: str, text_lower: str) -> bool:
     return re.search(r"(?<!\w)" + re.escape(entity_lower) + r"(?!\w)", text_lower) is not None
 
 
+_WORD_CHAR = re.compile(r"\w")
+
+
+def _build_text_matcher(patterns: list[str], use_automaton: bool | None = None):
+    """
+    Returns match(text_lower) -> sorted indices into `patterns` that occur in
+    text_lower as a whole word (the exact semantics of _whole_word_match).
+
+    The naive path runs one regex per pattern per passage, which is
+    O(passages x entities) — fine for tests, weeks for 21M passages x 50k
+    entities. When pyahocorasick is installed (or use_automaton=True) a single
+    Aho-Corasick pass finds every occurrence and the word-boundary check is
+    applied per hit, giving identical results in roughly linear time.
+    """
+    if use_automaton is None:
+        try:
+            import ahocorasick  # noqa: F401
+            use_automaton = True
+        except ImportError:
+            use_automaton = False
+
+    if not use_automaton:
+        def match_naive(text_lower: str) -> list[int]:
+            return [i for i, p in enumerate(patterns) if _whole_word_match(p, text_lower)]
+        return match_naive
+
+    import ahocorasick
+
+    by_pattern: dict[str, list[int]] = defaultdict(list)
+    for i, p in enumerate(patterns):
+        by_pattern[p].append(i)
+    automaton = ahocorasick.Automaton()
+    for p, idxs in by_pattern.items():
+        automaton.add_word(p, (len(p), tuple(idxs)))
+    automaton.make_automaton()
+
+    def match_automaton(text_lower: str) -> list[int]:
+        hits: set[int] = set()
+        n = len(text_lower)
+        for end, (length, idxs) in automaton.iter(text_lower):
+            start = end - length + 1
+            if start > 0 and _WORD_CHAR.match(text_lower[start - 1]):
+                continue
+            if end + 1 < n and _WORD_CHAR.match(text_lower[end + 1]):
+                continue
+            hits.update(idxs)
+        return sorted(hits)
+    return match_automaton
+
+
 def scope_corpus(
     wiki_stream: Iterable[dict],
     answers: set[str],
@@ -233,6 +293,7 @@ def scope_corpus(
     per_entity_cap: int = 20,
     n_distractors: int = 20_000,
     seed: int = 0,
+    use_automaton: bool | None = None,
 ) -> tuple[list[dict], dict[str, int]]:
     """
     Single pass over wiki_stream. For each entity in answers | eval_targets:
@@ -245,7 +306,9 @@ def scope_corpus(
     Returns:
         (kept_passages, coverage) where kept_passages is a list of
         {"id","title","text"} dicts (deduplicated) and coverage maps
-        each raw entity string -> number of passages kept for it.
+        each raw entity string -> number of kept passages that mention it.
+        A passage mentioning several entities counts toward each of them
+        (it is still stored once).
     """
     rng = random.Random(seed)
 
@@ -260,11 +323,15 @@ def scope_corpus(
 
     coverage: dict[str, int] = defaultdict(int)
     kept: dict[str, dict] = {}  # id -> passage, dedup
+    match_text = _build_text_matcher([e for e, _ in text_candidates], use_automaton)
 
     distractor_reservoir: list[dict] = []
     seen_distractors = 0
 
-    for passage in wiki_stream:
+    for n_seen, passage in enumerate(wiki_stream, start=1):
+        if n_seen % 1_000_000 == 0:
+            print(f"[scope] {n_seen:,} passages scanned, {len(kept):,} kept",
+                  file=sys.stderr, flush=True)
         pid = passage.get("id")
         title = passage.get("title", "")
         text = passage.get("text", "")
@@ -272,26 +339,28 @@ def scope_corpus(
         text_lower = text.lower()
 
         matched_any = False
+        key = pid if pid is not None else f"passage:{n_seen}"
+        counted: set[str] = set()  # each entity counts a passage at most once
+
+        def keep(raw_entity: str) -> None:
+            kept.setdefault(key, passage)
+            if raw_entity not in counted:
+                counted.add(raw_entity)
+                coverage[raw_entity] += 1
 
         # Title match
         entity = norm_to_entity.get(title_norm)
         if entity is not None and coverage[entity] < per_entity_cap:
-            key = pid if pid is not None else f"title:{title_norm}:{len(kept)}"
-            if key not in kept:
-                kept[key] = passage
-                coverage[entity] += 1
+            keep(entity)
             matched_any = True
 
         # Text match (whole word, case-insensitive)
-        for e_lower, raw_entity in text_candidates:
-            if coverage[raw_entity] >= per_entity_cap:
+        for idx in match_text(text_lower):
+            raw_entity = text_candidates[idx][1]
+            if raw_entity in counted or coverage[raw_entity] >= per_entity_cap:
                 continue
-            if _whole_word_match(e_lower, text_lower):
-                key = pid if pid is not None else f"text:{raw_entity}:{len(kept)}"
-                if key not in kept:
-                    kept[key] = passage
-                    coverage[raw_entity] += 1
-                matched_any = True
+            keep(raw_entity)
+            matched_any = True
 
         if not matched_any:
             seen_distractors += 1
@@ -413,6 +482,14 @@ def _scope(args: argparse.Namespace) -> None:
     test_rows = read_test(TEST_PATH)
 
     answers = {row["answer"] for row in train_rows}
+    if args.answer_sample and args.answer_sample < len(answers):
+        # Scoping all 50k answers yields a corpus far larger than a T4-sized
+        # run needs; freeze only draws 800 of them. Sorting first makes the
+        # sample depend on the seed alone, not on set iteration order.
+        answers = set(random.Random(args.seed).sample(sorted(answers), args.answer_sample))
+    if args.eval_sources:
+        wanted = {s.strip() for s in args.eval_sources.split(",") if s.strip()}
+        test_rows = [r for r in test_rows if r["source"] in wanted]
     eval_targets = {t for row in test_rows for t in row["targets"]}
 
     print(f"[scope] {len(answers)} unique train answers, "
@@ -569,6 +646,11 @@ def main() -> None:
     p_scope.add_argument("--per-entity-cap", dest="per_entity_cap", type=int, default=20)
     p_scope.add_argument("--n-distractors", dest="n_distractors", type=int, default=20_000)
     p_scope.add_argument("--seed", type=int, default=0)
+    p_scope.add_argument("--answer-sample", dest="answer_sample", type=int, default=0,
+                          help="scope only a seeded random subset of N train answers (0 = all)")
+    p_scope.add_argument("--eval-sources", dest="eval_sources", default="",
+                          help="comma list of test sources whose targets to scope, "
+                               "e.g. nq,hotpotqa (default: all)")
     p_scope.set_defaults(func=_scope)
 
     p_freeze = sub.add_parser("freeze", help="-> answers_toy, eval_toy, manifest.json")
