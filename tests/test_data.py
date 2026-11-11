@@ -50,6 +50,35 @@ def test_iter_wiki_unquotes_search_r1_titles(tmp_path):
     assert docs[1]["title"] == "Bob"
 
 
+def test_iter_wiki_reads_a_gzipped_tar_like_the_hf_wiki18_file(tmp_path):
+    # The HF wiki-18.jsonl.gz is really a .tar.gz holding one wiki_dump.jsonl;
+    # reading it as plain gzip hands json.loads a tar header.
+    import io
+    import tarfile
+
+    lines = [json.dumps({"id": str(i), "contents": f'"T{i}"\nbody {i}'}) for i in range(3)]
+    payload = ("\n".join(lines) + "\n").encode()
+    path = tmp_path / "wiki-18.jsonl.gz"
+    with tarfile.open(path, "w:gz") as tf:
+        info = tarfile.TarInfo("data00/flashrag/wiki_dump.jsonl")
+        info.size = len(payload)
+        tf.addfile(info, io.BytesIO(payload))
+    docs = list(iter_wiki(path))
+    assert [d["title"] for d in docs] == ["T0", "T1", "T2"]
+    assert docs[2]["text"] == "body 2"
+
+
+def test_iter_wiki_skips_a_few_bad_lines_but_rejects_a_non_jsonl_file(tmp_path):
+    path = tmp_path / "wiki.jsonl"
+    good = json.dumps({"id": "0", "title": "A", "text": "a"})
+    path.write_text(f"not json\n{good}\n")
+    assert [d["title"] for d in iter_wiki(path)] == ["A"]
+
+    path.write_text("garbage\n" * 5)
+    with pytest.raises(ValueError):
+        list(iter_wiki(path, max_bad_lines=2))
+
+
 # ---------------------------------------------------------------------------
 # text matcher: automaton must agree with the regex reference exactly
 # ---------------------------------------------------------------------------

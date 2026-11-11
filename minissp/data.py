@@ -193,7 +193,39 @@ def _open_maybe_gz(path: str | Path):
     return open(path, "r", encoding="utf-8", errors="replace")
 
 
-def iter_wiki(path: str | Path) -> Iterator[dict]:
+def _iter_text_lines(path: str | Path) -> Iterator[str]:
+    """
+    Yields text lines from a .jsonl, a .jsonl.gz, or a (gzipped) tar archive
+    of .jsonl files.
+
+    The HF `PeterJinGo/wiki-18-corpus` file is named wiki-18.jsonl.gz but is
+    actually a gzipped *tar* holding one .../wiki_dump.jsonl, so reading it
+    as plain gzip yields a 512-byte tar header as its first "line". Tar
+    archives are streamed member by member ("r|*"), never extracted to disk.
+    """
+    import tarfile
+
+    path = str(path)
+    if tarfile.is_tarfile(path):
+        with tarfile.open(path, "r|*") as archive:
+            for member in archive:
+                if not (member.isfile() and member.name.endswith((".jsonl", ".json"))):
+                    continue
+                print(f"[iter_wiki] reading {member.name} from tar archive {path}",
+                      file=sys.stderr, flush=True)
+                raw = archive.extractfile(member)
+                if raw is None:
+                    continue
+                # Not io.TextIOWrapper: stream-mode members lack seekable()
+                # on some Pythons. Same lenient decoding as _open_maybe_gz.
+                for bline in raw:
+                    yield bline.decode("utf-8", errors="replace")
+        return
+    with _open_maybe_gz(path) as f:
+        yield from f
+
+
+def iter_wiki(path: str | Path, max_bad_lines: int = 1000) -> Iterator[dict]:
     """
     Streams wiki-18 as {"id": str, "title": str, "text": str} dicts.
     Never loads the file into memory.
@@ -202,30 +234,46 @@ def iter_wiki(path: str | Path) -> Iterator[dict]:
     two most common shapes:
       - {"id", "title", "text"}
       - {"id", "contents"} where contents is "Title\ntext..." (Search-R1 style)
-    Confirm which shape your downloaded file actually uses before a full
-    scope_corpus run — the first few lines are cheap to eyeball.
+    and the containers plain / gzip / gzipped tar (see _iter_text_lines).
+
+    A line that isn't valid JSON is skipped and counted rather than aborting
+    an hour-long scan; more than `max_bad_lines` of them means the file is
+    not what we think it is, and raises.
     """
-    with _open_maybe_gz(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
+    bad = 0
+    for line in _iter_text_lines(path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
             row = json.loads(line)
-            if "title" in row and "text" in row:
-                yield {"id": row.get("id"), "title": row["title"], "text": row["text"]}
-            elif "contents" in row:
-                contents = row["contents"]
-                title, _, text = contents.partition("\n")
-                # Search-R1's wiki-18 stores the title line quoted ('"Aaron"');
-                # unquoted, it can title-match entities and renders cleanly in
-                # format_information's (Title: "...") wrapper.
-                title = title.strip()
-                if len(title) >= 2 and title[0] == '"' and title[-1] == '"':
-                    title = title[1:-1]
-                yield {"id": row.get("id"), "title": title, "text": text}
-            else:
-                # Unrecognized shape — skip rather than guess wrong.
-                continue
+        except json.JSONDecodeError:
+            bad += 1
+            if bad <= 3:
+                print(f"[iter_wiki] skipping unparseable line: {line[:120]!r}",
+                      file=sys.stderr, flush=True)
+            if bad > max_bad_lines:
+                raise ValueError(
+                    f"{bad} unparseable lines in {path}; this does not look like "
+                    f"a wiki-18 jsonl dump") from None
+            continue
+        if not isinstance(row, dict):
+            continue
+        if "title" in row and "text" in row:
+            yield {"id": row.get("id"), "title": row["title"], "text": row["text"]}
+        elif "contents" in row:
+            contents = row["contents"]
+            title, _, text = contents.partition("\n")
+            # Search-R1's wiki-18 stores the title line quoted ('"Aaron"');
+            # unquoted, it can title-match entities and renders cleanly in
+            # format_information's (Title: "...") wrapper.
+            title = title.strip()
+            if len(title) >= 2 and title[0] == '"' and title[-1] == '"':
+                title = title[1:-1]
+            yield {"id": row.get("id"), "title": title, "text": text}
+        # else: unrecognized shape — skip rather than guess wrong.
+    if bad:
+        print(f"[iter_wiki] skipped {bad} unparseable lines", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
